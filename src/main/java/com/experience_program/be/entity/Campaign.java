@@ -59,6 +59,12 @@ public class Campaign {
     @Column(name = "is_success_case")
     private boolean isSuccessCase;
 
+    @Column(name = "is_performance_registered", nullable = false, columnDefinition = "boolean default false")
+    private boolean isPerformanceRegistered = false;
+
+    @Column(name = "is_rag_registered", nullable = false, columnDefinition = "boolean default false")
+    private boolean isRagRegistered = false;
+
     @UpdateTimestamp
     @Column(name = "updated_at")
     private LocalDateTime updatedAt;

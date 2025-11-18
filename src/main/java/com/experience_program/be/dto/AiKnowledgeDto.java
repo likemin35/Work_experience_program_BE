@@ -7,18 +7,21 @@ import lombok.Getter;
 import lombok.Setter;
 
 import java.time.LocalDateTime;
+import java.util.Map;
 
 @Getter
 @Setter
 @AllArgsConstructor
-public class SuccessCaseDto {
-    private String title;
-    @JsonProperty("content_text")
-    private String contentText;
-    @JsonProperty("source_type")
-    private String sourceType;
-    @JsonProperty("related_campaign_id")
-    private String relatedCampaignId;
+public class AiKnowledgeDto {
+    @JsonProperty("campaign_id")
+    private String campaignId;
+
+    @JsonProperty("campaign_summary")
+    private String campaignSummary;
+
+    @JsonProperty("campaign_details")
+    private Map<String, Object> campaignDetails;
+
     @JsonProperty("registration_date")
     @JsonFormat(shape = JsonFormat.Shape.STRING, pattern = "yyyy-MM-dd HH:mm:ss")
     private LocalDateTime registrationDate;

@@ -48,6 +48,8 @@ public class CampaignService {
                 .status("PROCESSING")
                 .requestDate(LocalDateTime.now())
                 .isSuccessCase(false)
+                .isPerformanceRegistered(false)
+                .isRagRegistered(false)
                 .build();
         Campaign savedCampaign = campaignRepository.save(campaign);
 
@@ -181,44 +183,79 @@ public class CampaignService {
         campaign.setActualCtr(performanceDto.getActualCtr());
         campaign.setConversionRate(performanceDto.getConversionRate());
         campaign.setSuccessCase(performanceDto.getIsSuccessCase());
+        campaign.setPerformanceRegistered(true);
+
+        // status 업데이트 로직 추가
+        if (performanceDto.getIsSuccessCase()) {
+            campaign.setStatus("SUCCESS_CASE");
+        } else {
+            campaign.setStatus("PERFORMANCE_REGISTERED");
+        }
+        
         campaignRepository.save(campaign);
     }
 
     @Transactional
     public void triggerRagRegistration(UUID campaignId) {
         Campaign campaign = getCampaignById(campaignId);
-        if (campaign.isSuccessCase()) {
-            List<MessageResult> selectedMessages = messageResultRepository.findByCampaign_CampaignIdAndIsSelected(campaign.getCampaignId(), true);
-            if (selectedMessages.isEmpty()) {
-                throw new IllegalStateException("성공 사례로 등록할 최종 선택된 메시지가 없습니다.");
-            }
-            
-            // For simplicity, we'll use the first selected message for the RAG entry.
-            MessageResult firstSelectedMessage = selectedMessages.get(0);
 
-            String title = "성공사례: " + campaign.getPurpose();
-            String content = String.format(
+        // 성과가 등록되지 않은 캠페인은 RAG 등록 불가
+        if (!campaign.isPerformanceRegistered()) {
+            throw new IllegalStateException("성과가 등록되지 않은 캠페인은 RAG DB에 등록할 수 없습니다.");
+        }
+
+        List<MessageResult> selectedMessages = messageResultRepository.findByCampaign_CampaignIdAndIsSelected(campaign.getCampaignId(), true);
+        if (selectedMessages.isEmpty()) {
+            throw new IllegalStateException("RAG DB에 등록할 최종 선택된 메시지가 없습니다.");
+        }
+        
+        MessageResult firstSelectedMessage = selectedMessages.get(0);
+
+        String title;
+        String sourceType;
+        String content;
+
+        if (campaign.isSuccessCase()) {
+            title = "성공사례: " + campaign.getPurpose();
+            sourceType = "성공_사례";
+            content = String.format(
                     "캠페인 목적: %s\n핵심 혜택: %s\n성공 메시지: %s",
                     campaign.getPurpose(),
                     campaign.getCoreBenefitText(),
                     firstSelectedMessage.getMessageText()
             );
-            SuccessCaseDto successCaseDto = new SuccessCaseDto(
-                    title,
-                    content,
-                    "성공_사례",
-                    campaign.getCampaignId().toString()
-            );
-
-            webClient.post()
-                    .uri("/api/knowledge")
-                    .body(Mono.just(successCaseDto), SuccessCaseDto.class)
-                    .retrieve()
-                    .bodyToMono(Void.class)
-                    .subscribe();
         } else {
-            throw new IllegalStateException("성공 사례로 지정되지 않은 캠페인은 RAG DB에 등록할 수 없습니다.");
+            title = "실패사례: " + campaign.getPurpose();
+            sourceType = "실패_사례";
+            content = String.format(
+                    "캠페인 목적: %s\n핵심 혜택: %s\n성과 저조 메시지: %s\n(CTR: %s, 전환율: %s)",
+                    campaign.getPurpose(),
+                    campaign.getCoreBenefitText(),
+                    firstSelectedMessage.getMessageText(),
+                    campaign.getActualCtr(),
+                    campaign.getConversionRate()
+            );
         }
+
+        SuccessCaseDto successCaseDto = new SuccessCaseDto(
+                title,
+                content,
+                sourceType,
+                campaign.getCampaignId().toString(),
+                campaign.getRequestDate()
+        );
+
+        webClient.post()
+                .uri("/api/knowledge")
+                .body(Mono.just(successCaseDto), SuccessCaseDto.class)
+                .retrieve()
+                .bodyToMono(Void.class)
+                .doOnSuccess(aVoid -> {
+                    campaign.setRagRegistered(true);
+                    campaign.setStatus("RAG_REGISTERED");
+                    campaignRepository.save(campaign);
+                })
+                .subscribe();
     }
 
     @Transactional
