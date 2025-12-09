@@ -5,6 +5,7 @@ import com.experience_program.be.dto.KnowledgeRequestDto;
 import com.experience_program.be.dto.KnowledgeUpdateDto;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 import org.springframework.web.reactive.function.client.WebClient;
@@ -15,7 +16,6 @@ import java.time.format.DateTimeFormatter;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
-import java.util.stream.Collectors;
 
 @Service
 public class KnowledgeService {
@@ -63,12 +63,12 @@ public class KnowledgeService {
                         uriBuilder.queryParam("source_type", sourceType);
                     }
 
-                    if (pageable.getSort().isSorted()) {
-                        String sortString = pageable.getSort().stream()
-                                .map(order -> order.getProperty() + "," + order.getDirection().name().toLowerCase())
-                                .collect(Collectors.joining());
-                        uriBuilder.queryParam("sort", sortString);
+                    // AI 서버의 새로운 정렬 방식에 맞게 파라미터 변환
+                    for (Sort.Order order : pageable.getSort()) {
+                        uriBuilder.queryParam("sort_by", order.getProperty());
+                        uriBuilder.queryParam("sort_order", order.getDirection().name().toLowerCase());
                     }
+
                     return uriBuilder.build();
                 })
                 .retrieve()
