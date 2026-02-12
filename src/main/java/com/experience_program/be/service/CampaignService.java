@@ -1,378 +1,572 @@
 package com.experience_program.be.service;
 
-import com.experience_program.be.controller.CampaignSpecification;
 import com.experience_program.be.dto.*;
-import com.experience_program.be.entity.*;
-import com.experience_program.be.repository.CampaignRepository;
-import com.experience_program.be.repository.ChatMessageRepository;
-import com.experience_program.be.repository.ChatSessionRepository;
+import com.experience_program.be.entity.Campaign;
+import com.experience_program.be.entity.CustomerSegment;
+import com.experience_program.be.entity.MessageResult;
 import com.experience_program.be.repository.MessageResultRepository;
+import com.experience_program.be.repository.CampaignRepository;
+import com.experience_program.be.repository.CustomerSegmentRepository;
+import com.experience_program.be.customer.domain.CustomerRow;
+import com.experience_program.be.service.customer.CustomerCsvService;
+import com.experience_program.be.service.customer.CustomerDescriptionBuilder;
 import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.data.domain.Page;
-import org.springframework.data.domain.Pageable;
-import org.springframework.data.jpa.domain.Specification;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-import org.springframework.util.StringUtils;
-import org.springframework.web.reactive.function.client.WebClient;
-import reactor.core.publisher.Mono;
+import org.springframework.web.client.RestClient;
+import org.springframework.web.multipart.MultipartFile;
+import org.springframework.http.MediaType;
+import org.springframework.data.domain.Sort;
 
-import java.io.IOException;
-import java.time.LocalDate;
+import java.io.ByteArrayOutputStream;
+import java.nio.charset.StandardCharsets;
 import java.time.LocalDateTime;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.UUID;
+import java.util.*;
 import java.util.stream.Collectors;
-import java.util.stream.IntStream;
 
+@Slf4j
 @Service
+@RequiredArgsConstructor
 public class CampaignService {
 
     private final CampaignRepository campaignRepository;
+    private final CustomerSegmentRepository customerSegmentRepository;
     private final MessageResultRepository messageResultRepository;
-    private final ChatSessionRepository chatSessionRepository;
-    private final ChatMessageRepository chatMessageRepository;
-    private final WebClient webClient;
+
+    private final CustomerCsvService customerCsvService;
+    private final CustomerDescriptionBuilder customerDescriptionBuilder;
+
+    private final RestClient aiRestClient;
     private final ObjectMapper objectMapper;
 
-    private static final int MAX_CHAT_SESSIONS = 50;
-
-    @Autowired
-    public CampaignService(CampaignRepository campaignRepository, MessageResultRepository messageResultRepository,
-                           ChatSessionRepository chatSessionRepository, ChatMessageRepository chatMessageRepository,
-                           WebClient webClient, ObjectMapper objectMapper) {
-        this.campaignRepository = campaignRepository;
-        this.messageResultRepository = messageResultRepository;
-        this.chatSessionRepository = chatSessionRepository;
-        this.chatMessageRepository = chatMessageRepository;
-        this.webClient = webClient;
-        this.objectMapper = objectMapper;
-    }
-
+    /* =========================
+       캠페인 생성
+       ========================= */
     @Transactional
-    public CampaignChatResponseDto handleInteractiveBuild(CampaignChatRequestDto request) {
-        // 1. AI 서버 호출을 동기 방식으로 변경
-        CampaignChatResponseDto response = webClient.post()
-                .uri("/api/build-campaign/interactive")
-                .body(Mono.just(request), CampaignChatRequestDto.class)
-                .retrieve()
-                .bodyToMono(CampaignChatResponseDto.class)
-                .block(); // 응답이 올 때까지 대기
-
-        if (response != null) {
-            // 2. DB 저장 로직을 동기 코드 블록 안에서 실행
-            saveChatHistory(request, response);
-            enforceChatSessionLimit();
-        }
-
-        return response;
-    }
-
-    private void saveChatHistory(CampaignChatRequestDto request, CampaignChatResponseDto response) {
-        String conversationId = response.getConversationId();
-        ChatSession session = chatSessionRepository.findById(conversationId)
-                .orElseGet(() -> ChatSession.builder().conversationId(conversationId).build());
-
-        // AI가 생성한 캠페인 제목으로 세션 제목 업데이트
-        if (response.getCurrentCampaignData() != null && StringUtils.hasText(response.getCurrentCampaignData().getCampaignTitle())) {
-            session.setTitle(response.getCurrentCampaignData().getCampaignTitle());
-        }
-
-        // 사용자 메시지 저장
-        ChatMessage userMessage = ChatMessage.builder()
-                .session(session)
-                .role("user")
-                .content(request.getUserMessage())
-                .build();
-        session.getMessages().add(userMessage);
-
-        // AI 응답 메시지 저장
-        ChatMessage aiMessage = ChatMessage.builder()
-                .session(session)
-                .role("assistant")
-                .content(response.getAiResponse())
-                .build();
-        session.getMessages().add(aiMessage);
-
-        chatSessionRepository.save(session);
-    }
-
-    private void enforceChatSessionLimit() {
-        long totalSessions = chatSessionRepository.count();
-        if (totalSessions > MAX_CHAT_SESSIONS) {
-            chatSessionRepository.findFirstByOrderByLastUpdatedAtAsc()
-                    .ifPresent(chatSessionRepository::delete);
-        }
-    }
-
-    // ... (기존의 다른 메서드들은 그대로 유지)
-    @Transactional
-    public Campaign createCampaign(CampaignRequestDto campaignRequestDto) {
-        String sourceUrlsJson = convertObjectToJson(campaignRequestDto.getSourceUrls());
-        String customColumnsJson = convertObjectToJson(campaignRequestDto.getCustomColumns());
+    public Campaign createCampaign(CampaignRequestDto dto) {
 
         Campaign campaign = Campaign.builder()
-                .marketerId(campaignRequestDto.getMarketerId())
-                .purpose(campaignRequestDto.getPurpose())
-                .coreBenefitText(campaignRequestDto.getCoreBenefitText())
-                .sourceUrl(sourceUrlsJson)
-                .customColumns(customColumnsJson)
-                .status("PROCESSING")
+                .marketerId(dto.getMarketerId())
+                .title(dto.getTitle())
+                .coreBenefitText(dto.getCoreBenefitText())
+                .sourceUrl(convertObjectToJson(dto.getSourceUrl()))
+                .customColumns(convertObjectToJson(dto.getCustomColumns()))
+                .status("CREATED")
                 .requestDate(LocalDateTime.now())
-                .performanceStatus(PerformanceStatus.UNDECIDED)
-                .isPerformanceRegistered(false)
-                .isRagRegistered(false)
                 .build();
-        Campaign savedCampaign = campaignRepository.save(campaign);
 
-        webClient.post()
-                .uri("/api/generate")
-                .body(Mono.just(campaignRequestDto), CampaignRequestDto.class)
-                .retrieve()
-                .bodyToMono(AiResponseDto.class)
-                .doOnError(error -> updateCampaignStatus(savedCampaign.getCampaignId(), "FAILED"))
-                .subscribe(aiResponse -> {
-                    saveAiResponse(savedCampaign, aiResponse);
-                    updateCampaignStatus(savedCampaign.getCampaignId(), "COMPLETED");
-                });
-
-        return savedCampaign;
+        return campaignRepository.save(campaign);
     }
 
+
+    /* =========================
+       CSV 업로드 + 세그먼트 생성
+       ========================= */
     @Transactional
-    public void saveAiResponse(Campaign campaign, AiResponseDto aiResponse) {
-        List<MessageResult> messageResults = aiResponse.getTarget_groups().stream()
-                .flatMap(targetGroupDto -> targetGroupDto.getMessage_drafts().stream()
-                        .map(messageDraftDto -> {
-                            String validationReportJson = convertObjectToJson(messageDraftDto.getValidationReport());
-                            return MessageResult.builder()
-                                    .campaign(campaign)
-                                    .targetGroupIndex(targetGroupDto.getTarget_group_index())
-                                    .targetName(targetGroupDto.getTarget_name())
-                                    .targetFeatures(targetGroupDto.getTarget_features())
-                                    .classificationReason(targetGroupDto.getClassification_reason())
-                                    .messageDraftIndex(messageDraftDto.getMessageDraftIndex())
-                                    .messageText(messageDraftDto.getMessageText())
-                                    .validatorReport(validationReportJson)
-                                    .isSelected(false)
-                                    .build();
-                        }))
-                .collect(Collectors.toList());
-        messageResultRepository.saveAll(messageResults);
-    }
+    public void uploadCsvAndSegment(String campaignId, MultipartFile file) {
 
-    public Page<Campaign> getAllCampaigns(LocalDate requestDate, String status, String purpose, String marketerId, Pageable pageable) {
-        Specification<Campaign> spec = CampaignSpecification.withDynamicQuery(requestDate, status, purpose, marketerId);
-        return campaignRepository.findAll(spec, pageable);
-    }
+        log.info("uploadCsvAndSegment campaignId={}", campaignId);
 
-    public Campaign getCampaignById(UUID campaignId) {
-        return campaignRepository.findById(campaignId)
-                .orElseThrow(() -> new ResourceNotFoundException("ID " + campaignId + "에 해당하는 캠페인을 찾을 수 없습니다."));
-    }
-
-    @Transactional
-    public void selectMessage(UUID campaignId, List<UUID> resultIds) {
         Campaign campaign = getCampaignById(campaignId);
-        List<MessageResult> allResults = messageResultRepository.findByCampaign_CampaignId(campaignId);
-        allResults.forEach(result -> result.setSelected(false));
 
-        List<MessageResult> selectedResults = messageResultRepository.findAllById(resultIds);
-        for (MessageResult result : selectedResults) {
-            if (!result.getCampaign().getCampaignId().equals(campaignId)) {
-                throw new IllegalArgumentException("선택된 메시지(ID: " + result.getResultId() + ")가 현재 캠페인에 속해있지 않습니다.");
+        List<CustomerRow> rows = customerCsvService.parse(file);
+
+        Map<String, CustomerRow> rowMap = rows.stream()
+                .collect(Collectors.toMap(
+                        CustomerRow::getCustomerId,
+                        r -> r,
+                        (a, b) -> a,
+                        LinkedHashMap::new
+                ));
+
+        List<CustomerClusteringRequestDto.CustomerDto> customerDtos =
+                rows.stream()
+                        .map(r -> CustomerClusteringRequestDto.CustomerDto.builder()
+                                .customerId(r.getCustomerId())
+                                .description(customerDescriptionBuilder.build(r))
+                                .build())
+                        .toList();
+
+        CustomerClusteringRequestDto requestDto =
+                CustomerClusteringRequestDto.from(campaign, customerDtos);
+
+        CustomerClusteringResponseDto response =
+                aiRestClient.post()
+                        .uri("/cluster-customers")
+                        .body(requestDto)
+                        .retrieve()
+                        .body(CustomerClusteringResponseDto.class);
+
+        log.info("AI clustering response={}", response);
+
+        if (response == null || response.getClusters() == null) {
+            throw new IllegalStateException("세그먼트 생성 실패");
+        }
+
+        customerSegmentRepository.deleteByCampaign(campaign);
+
+        Set<String> processedCustomerIds = new HashSet<>();
+
+        for (ClusterResultDto cluster : response.getClusters()) {
+            for (String cid : cluster.getCustomerIds()) {
+
+                if (!processedCustomerIds.add(cid)) continue;
+
+                CustomerRow row = rowMap.get(cid);
+
+                customerSegmentRepository.save(
+                        CustomerSegment.builder()
+                                .campaign(campaign)
+                                .customerId(cid)
+                                .customerName(row != null ? row.get("name") : "")
+                                .phoneNumber(
+                                row != null
+                                        ? Optional.ofNullable(row.get("phone_number"))
+                                        .orElse(row.get("phoneNumber"))
+                                        : ""
+                                )
+                                .targetSegment(cluster.getClusterName())
+                                .segmentReason(cluster.getClusterDescription())
+                                .customerFeatures(
+                                        row != null ? customerDescriptionBuilder.build(row) : ""
+                                )
+                                .createdAt(LocalDateTime.now())
+                                .build()
+                );
             }
-            result.setSelected(true);
         }
-        
-        messageResultRepository.saveAll(allResults);
-        messageResultRepository.saveAll(selectedResults);
-        updateCampaignStatus(campaignId, "MESSAGE_SELECTED");
-    }
 
-    @Transactional
-    public void refineMessage(UUID campaignId, String feedback) {
-        Campaign campaign = getCampaignById(campaignId);
-        updateCampaignStatus(campaignId, "REFINING");
-
-        CampaignRequestDto campaignContext = new CampaignRequestDto();
-        campaignContext.setMarketerId(campaign.getMarketerId());
-        campaignContext.setPurpose(campaign.getPurpose());
-        campaignContext.setCoreBenefitText(campaign.getCoreBenefitText());
-        campaignContext.setSourceUrls(convertJsonToList(campaign.getSourceUrl()));
-        campaignContext.setCustomColumns(convertJsonToMap(campaign.getCustomColumns()));
-
-        List<MessageResult> previousResults = messageResultRepository.findByCampaign_CampaignId(campaignId);
-        List<Map<String, Object>> targetPersonas = previousResults.stream()
-                .map(result -> {
-                    Map<String, Object> persona = new HashMap<>();
-                    persona.put("target_group_index", result.getTargetGroupIndex());
-                    persona.put("target_name", result.getTargetName());
-                    persona.put("target_features", result.getTargetFeatures());
-                    return persona;
-                })
-                .distinct()
-                .collect(Collectors.toList());
-
-        Map<String, Object> requestBody = new HashMap<>();
-        requestBody.put("campaign_context", campaignContext);
-        requestBody.put("feedback_text", feedback);
-        requestBody.put("target_personas", targetPersonas);
-
-        webClient.post()
-                .uri("/api/campaigns/" + campaignId + "/refine")
-                .body(Mono.just(requestBody), Map.class)
-                .retrieve()
-                .bodyToMono(AiResponseDto.class)
-                .doOnError(error -> {
-                    System.err.println("Error during refine call: " + error.getMessage());
-                    updateCampaignStatus(campaign.getCampaignId(), "FAILED");
-                })
-                .subscribe(aiResponse -> {
-                    List<MessageResult> oldResults = messageResultRepository.findByCampaign_CampaignId(campaignId);
-                    messageResultRepository.deleteAll(oldResults);
-                    saveAiResponse(campaign, aiResponse);
-                    updateCampaignStatus(campaign.getCampaignId(), "COMPLETED");
-                });
-    }
-
-    @Transactional
-    public void deleteCampaign(UUID campaignId) {
-        if (!campaignRepository.existsById(campaignId)) {
-            throw new ResourceNotFoundException("ID " + campaignId + "에 해당하는 캠페인을 찾을 수 없습니다.");
-        }
-        campaignRepository.deleteById(campaignId);
-    }
-
-    @Transactional
-    public void updatePerformance(UUID campaignId, CampaignPerformanceUpdateDto performanceDto) {
-        Campaign campaign = getCampaignById(campaignId);
-        campaign.setActualCtr(performanceDto.getActualCtr());
-        campaign.setConversionRate(performanceDto.getConversionRate());
-        campaign.setPerformanceStatus(performanceDto.getPerformanceStatus());
-        campaign.setPerformanceNotes(performanceDto.getPerformanceNotes());
-        campaign.setPerformanceRegistered(true);
-
-        switch (performanceDto.getPerformanceStatus()) {
-            case SUCCESS:
-                campaign.setStatus("SUCCESS_CASE");
-                break;
-            case FAILURE:
-            case UNDECIDED:
-            default:
-                campaign.setStatus("PERFORMANCE_REGISTERED");
-                break;
-        }
-        
+        campaign.setStatus("SEGMENTED");
         campaignRepository.save(campaign);
     }
 
-    @Transactional
-    public void triggerRagRegistration(UUID campaignId) {
+    /* =========================
+       세그먼트 조회
+       ========================= */
+    @Transactional(readOnly = true)
+    public List<CustomerSegmentResponseDto> getCustomerSegments(String campaignId) {
+
+        Campaign campaign = getCampaignById(campaignId);
+        log.info("campaign status = {}", campaign.getStatus());
+        if (!List.of("SEGMENTED", "MESSAGE_GENERATED").contains(campaign.getStatus())) {
+            throw new IllegalStateException("세그먼트가 생성되지 않은 캠페인입니다.");
+        }
+
+        return customerSegmentRepository
+                .findByCampaign(campaign)
+                .stream()
+                .sorted(Comparator.comparingInt(
+                    s -> Integer.parseInt(s.getCustomerId())
+                ))
+                .map(s -> CustomerSegmentResponseDto.builder()
+                        .customerId(s.getCustomerId())
+                        .customerName(s.getCustomerName())
+                        .phoneNumber(s.getPhoneNumber())
+                        .targetSegment(s.getTargetSegment())
+                        .segmentReason(s.getSegmentReason())
+                        .customerFeatures(s.getCustomerFeatures())
+                        .build())
+                .toList();
+    }
+
+
+    /* =========================
+       CSV 다운로드
+       ========================= */
+    @Transactional(readOnly = true)
+    public byte[] downloadCustomerSegmentsCsv(String campaignId) {
+
         Campaign campaign = getCampaignById(campaignId);
 
-        if (!campaign.isPerformanceRegistered()) {
-            throw new IllegalStateException("성과가 등록되지 않은 캠페인은 RAG DB에 등록할 수 없습니다.");
-        }
-        if (campaign.getPerformanceStatus() == PerformanceStatus.UNDECIDED) {
-            throw new IllegalStateException("'미정' 상태의 캠페인은 RAG DB에 등록할 수 없습니다.");
-        }
-
-        List<MessageResult> selectedMessages = messageResultRepository.findByCampaign_CampaignIdAndIsSelected(campaign.getCampaignId(), true);
-        if (selectedMessages.isEmpty()) {
-            throw new IllegalStateException("RAG DB에 등록할 최종 선택된 메시지가 없습니다.");
+        List<CustomerSegment> segments =
+                customerSegmentRepository.findByCampaign(campaign);
+        
+        if (segments.isEmpty()) {
+            throw new IllegalStateException("생성된 세그먼트가 없습니다.");
         }
 
-        String title;
-        String sourceType = (campaign.getPerformanceStatus() == PerformanceStatus.SUCCESS) ? "성공_사례" : "실패_사례";
-        title = sourceType.replace("_", " ") + ": " + campaign.getPurpose();
+        segments.sort(Comparator.comparingInt(
+                    s -> Integer.parseInt(s.getCustomerId())
+                ));
 
-        String combinedMessages = IntStream.range(0, selectedMessages.size())
-                .mapToObj(i -> String.format("[메시지 %d] 타겟: %s\n내용: %s",
-                        i + 1,
-                        selectedMessages.get(i).getTargetName(),
-                        selectedMessages.get(i).getMessageText()))
-                .collect(Collectors.joining("\n\n---\n\n"));
 
-        String performanceSection = String.format("--- 성과 ---\nCTR: %s\n전환율: %s",
-                campaign.getActualCtr(), campaign.getConversionRate());
-        if (StringUtils.hasText(campaign.getPerformanceNotes())) {
-            performanceSection += "\n\n--- 성과 분석 ---\n" + campaign.getPerformanceNotes();
+        StringBuilder sb = new StringBuilder();
+        sb.append("customer_id,customer_name,phone_number,target_segment,segment_reason,customer_features\n");
+
+        for (CustomerSegment s : segments) {
+            sb.append(escape(s.getCustomerId())).append(",")
+              .append(escape(s.getCustomerName())).append(",")
+              .append(escape(s.getPhoneNumber())).append(",")
+              .append(escape(s.getTargetSegment())).append(",")
+              .append(escape(s.getSegmentReason())).append(",")
+              .append(escape(s.getCustomerFeatures())).append("\n");
         }
 
-        String content = String.format(
-                "캠페인 목적: %s\n핵심 혜택: %s\n\n--- 참고 메시지 ---\n\n%s\n\n%s",
-                campaign.getPurpose(),
-                campaign.getCoreBenefitText(),
-                combinedMessages,
-                performanceSection
-        );
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        out.writeBytes(new byte[]{(byte) 0xEF, (byte) 0xBB, (byte) 0xBF});
+        out.writeBytes(sb.toString().getBytes(StandardCharsets.UTF_8));
 
-        SuccessCaseDto successCaseDto = new SuccessCaseDto(
-                title,
-                content,
-                sourceType,
-                campaign.getCampaignId().toString(),
-                campaign.getRequestDate()
-        );
-
-        webClient.post()
-                .uri("/api/knowledge")
-                .body(Mono.just(successCaseDto), SuccessCaseDto.class)
-                .retrieve()
-                .bodyToMono(Void.class)
-                .doOnSuccess(aVoid -> {
-                    campaign.setRagRegistered(true);
-                    campaign.setStatus("RAG_REGISTERED");
-                    campaignRepository.save(campaign);
-                })
-                .subscribe();
+        return out.toByteArray();
     }
 
     @Transactional
-    public void updateCampaignStatus(UUID campaignId, String newStatus) {
+    public void generateMessagesBySegment(String campaignId) {
+
         Campaign campaign = getCampaignById(campaignId);
-        campaign.setStatus(newStatus);
+
+        if ("CREATED".equals(campaign.getStatus())) {
+            throw new IllegalStateException("세그먼트 생성 후에만 메시지를 생성할 수 있습니다.");
+        }
+
+        // 1. 고객 세그먼트 조회
+        List<CustomerSegment> segments =
+                customerSegmentRepository.findByCampaign(campaign);
+
+        if (segments.isEmpty()) {
+            throw new IllegalStateException("생성된 세그먼트가 없습니다.");
+        }
+
+        // 2. 세그먼트명 기준으로 그룹핑
+        Map<String, List<CustomerSegment>> grouped =
+                segments.stream()
+                        .collect(Collectors.groupingBy(CustomerSegment::getTargetSegment));
+
+        // 3. AI에 넘길 세그먼트 단위 입력 생성
+        List<Map<String, String>> aiSegments =
+                grouped.entrySet().stream()
+                        .map(entry -> {
+                            String targetSegment = entry.getKey();
+                            List<CustomerSegment> groupSegments = entry.getValue();
+
+                            String mergedFeatures =
+                                    groupSegments.stream()
+                                            .map(CustomerSegment::getCustomerFeatures)
+                                            .filter(Objects::nonNull)
+                                            .flatMap(f -> Arrays.stream(f.split("\n")))
+                                            .map(String::trim)
+                                            .filter(s -> !s.isEmpty())
+                                            .collect(Collectors.groupingBy(
+                                                    s -> s,
+                                                    Collectors.counting()
+                                            ))
+                                            .entrySet().stream()
+                                            .sorted(Map.Entry.<String, Long>comparingByValue().reversed())
+                                            .limit(10)
+                                            .map(Map.Entry::getKey)
+                                            .collect(Collectors.joining("\n"));
+
+                            return Map.of(
+                                    "target_segment", targetSegment,
+                                    "segment_features", mergedFeatures
+                            );
+                        })
+                        .toList();
+
+        Map<String, Object> aiRequest = Map.of(
+                "title", campaign.getTitle(),
+                "sourceUrl", campaign.getSourceUrl(),
+                "coreBenefitText", campaign.getCoreBenefitText(),
+                "segments", aiSegments
+        );
+
+        Map<String, Object> aiResponse =
+                aiRestClient.post()
+                        .uri("/generate-messages")
+                        .body(aiRequest)
+                        .retrieve()
+                        .body(Map.class);
+
+        if (aiResponse == null || !aiResponse.containsKey("messages")) {
+            throw new IllegalStateException("AI 메시지 생성 실패");
+        }
+
+        messageResultRepository.deleteByCampaign(campaign);
+
+        List<Map<String, Object>> messages =
+                (List<Map<String, Object>>) aiResponse.get("messages");
+
+        for (Map<String, Object> msgGroup : messages) {
+
+            int targetGroupIndex =
+                    ((Number) msgGroup.get("target_group_index")).intValue();
+            String targetName = (String) msgGroup.get("target_name");
+
+            List<Map<String, Object>> drafts =
+                    (List<Map<String, Object>>) msgGroup.get("message_drafts");
+
+            for (Map<String, Object> draft : drafts) {
+
+                MessageResult result = MessageResult.builder()
+                        .campaign(campaign)
+                        .targetGroupIndex(targetGroupIndex)
+                        .targetName(targetName)
+                        .messageText((String) draft.get("message_text"))
+                        .build();
+
+                messageResultRepository.save(result);
+            }
+        }
+
+        campaign.setStatus("MESSAGE_GENERATED");
         campaignRepository.save(campaign);
     }
 
-    // Helper methods for JSON conversion
-    private String convertObjectToJson(Object object) {
-        if (object == null) {
-            return null;
+    @Transactional(readOnly = true)
+    public List<CustomerSegmentMessageDto> mapCustomerMessages(
+            String campaignId,
+            Map<String, String> segmentMessageMap
+    ) {
+        Campaign campaign = getCampaignById(campaignId);
+
+        List<CustomerSegment> segments =
+                customerSegmentRepository.findByCampaign(campaign);
+
+        if (segments.isEmpty()) {
+            throw new IllegalStateException("생성된 세그먼트가 없습니다.");
         }
+
+        segments.sort(Comparator.comparingInt(
+                    s -> Integer.parseInt(s.getCustomerId())
+                ));
+
+        return segments.stream()
+                .map(s -> {
+                    String template = segmentMessageMap.get(s.getTargetSegment());
+                    String message = applyTemplate(template, s.getCustomerName());
+
+                    return new CustomerSegmentMessageDto(
+                            s.getCustomerId(),
+                            s.getCustomerName(),
+                            s.getPhoneNumber(),
+                            s.getTargetSegment(),
+                            s.getSegmentReason(),
+                            s.getCustomerFeatures(),
+                            message
+                    );
+                })
+                .toList();
+    }
+
+    @Transactional(readOnly = true)
+    public byte[] downloadCustomerMessageCsv(
+            String campaignId,
+            Map<String, String> segmentMessageMap
+    ) {
+        Campaign campaign = getCampaignById(campaignId);
+
+        List<CustomerSegment> segments =
+                customerSegmentRepository.findByCampaign(campaign);
+
+        if (segments.isEmpty()) {
+            throw new IllegalStateException("생성된 세그먼트가 없습니다.");
+        }
+
+        segments.sort(Comparator.comparingInt( 
+                    s -> Integer.parseInt(s.getCustomerId()) 
+                ));
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("customer_id,customer_name,phone_number,target_segment,segment_reason,customer_features,message\n");
+
+        for (CustomerSegment s : segments) {
+            String template = segmentMessageMap.get(s.getTargetSegment());
+            String message = applyTemplate(template, s.getCustomerName());
+
+            sb.append(escape(s.getCustomerId())).append(",")
+            .append(escape(s.getCustomerName())).append(",")
+            .append(escape(s.getPhoneNumber())).append(",")
+            .append(escape(s.getTargetSegment())).append(",")
+            .append(escape(s.getSegmentReason())).append(",")
+            .append(escape(s.getCustomerFeatures())).append(",")
+            .append(escape(message)).append("\n");
+        }
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        out.writeBytes(new byte[]{(byte) 0xEF, (byte) 0xBB, (byte) 0xBF});
+        out.writeBytes(sb.toString().getBytes(StandardCharsets.UTF_8));
+
+        return out.toByteArray();
+    }
+
+
+
+    @Transactional
+    public void updateMessageDraft(UUID resultId, MessageDraftDto dto) {
+
+        MessageResult result = messageResultRepository.findById(resultId)
+                .orElseThrow(() -> new IllegalArgumentException("메시지를 찾을 수 없습니다."));
+
+        result.setMessageText(dto.getMessageText());
+
+        messageResultRepository.save(result);
+    }
+
+    @Transactional(readOnly = true)
+    public List<CampaignResponseDto> getAllCampaigns() {
+        return campaignRepository
+                .findAll(Sort.by(Sort.Direction.DESC, "requestDate"))
+                .stream()
+                .map(CampaignResponseDto::from)
+                .toList();
+    }
+
+    @Transactional(readOnly = true)
+    public List<CustomerSegmentMessageDto> mapCustomerMessagesFromDb(
+            String campaignId
+    ) {
+        Campaign campaign = getCampaignById(campaignId);
+
+        List<CustomerSegment> segments =
+                customerSegmentRepository.findByCampaign(campaign);
+
+        List<MessageResult> messages =
+                messageResultRepository.findByCampaign(campaign);
+
+        Map<String, String> segmentMessageMap =
+                messages.stream()
+                        .collect(Collectors.toMap(
+                                MessageResult::getTargetName,
+                                MessageResult::getMessageText,
+                                (a, b) -> a
+                        ));
+
+        return segments.stream()
+                .map(s -> {
+                    String template =
+                            segmentMessageMap.get(s.getTargetSegment());
+                    String message =
+                            applyTemplate(template, s.getCustomerName());
+
+                    return new CustomerSegmentMessageDto(
+                            s.getCustomerId(),
+                            s.getCustomerName(),
+                            s.getPhoneNumber(),
+                            s.getTargetSegment(),
+                            s.getSegmentReason(),
+                            s.getCustomerFeatures(),
+                            message
+                    );
+                })
+                .toList();
+    }
+
+    @Transactional(readOnly = true)
+    public byte[] downloadCustomerMessageCsvFromDb(String campaignId) {
+
+        Campaign campaign = getCampaignById(campaignId);
+
+        List<CustomerSegment> segments =
+                customerSegmentRepository.findByCampaign(campaign);
+
+        if (segments.isEmpty()) {
+            throw new IllegalStateException("고객 세그먼트가 없습니다.");
+        }
+
+        List<MessageResult> messages =
+                messageResultRepository.findByCampaign(campaign);
+
+        Map<String, String> segmentMessageMap =
+                messages.stream()
+                        .collect(Collectors.toMap(
+                                MessageResult::getTargetName,
+                                MessageResult::getMessageText,
+                                (a, b) -> a
+                        ));
+
+        segments.sort(Comparator.comparingInt( 
+                    s -> Integer.parseInt(s.getCustomerId()) 
+                ));
+
+        StringBuilder sb = new StringBuilder();
+        sb.append(
+            "customer_id,customer_name,phone_number,target_segment,segment_reason,customer_features,message\n"
+        );
+
+        for (CustomerSegment s : segments) {
+
+            String template = segmentMessageMap.get(s.getTargetSegment());
+            String message =
+                    template != null
+                            ? template.replace("{name}", s.getCustomerName())
+                            : "";
+
+            sb.append(escape(s.getCustomerId())).append(",")
+            .append(escape(s.getCustomerName())).append(",")
+            .append(escape(s.getPhoneNumber())).append(",")
+            .append(escape(s.getTargetSegment())).append(",")
+            .append(escape(s.getSegmentReason())).append(",")
+            .append(escape(s.getCustomerFeatures())).append(",")
+            .append(escape(message)).append("\n");
+        }
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        out.writeBytes(new byte[]{(byte) 0xEF, (byte) 0xBB, (byte) 0xBF});
+        out.writeBytes(sb.toString().getBytes(StandardCharsets.UTF_8));
+
+        return out.toByteArray();
+    }
+
+
+    /* =========================
+       내부 유틸
+       ========================= */
+    public Campaign getCampaignById(String campaignId) {
+        return campaignRepository.findById(campaignId)
+                .orElseThrow(() -> new IllegalArgumentException("캠페인을 찾을 수 없습니다."));
+    }
+
+    private String convertObjectToJson(Object obj) {
+        if (obj == null) return null;
         try {
-            return objectMapper.writeValueAsString(object);
+            return objectMapper.writeValueAsString(obj);
         } catch (JsonProcessingException e) {
-            throw new RuntimeException("객체를 JSON으로 변환하는 데 실패했습니다.", e);
+            throw new IllegalArgumentException("JSON 변환 실패", e);
         }
     }
 
-    private List<String> convertJsonToList(String json) {
-        if (!StringUtils.hasText(json)) {
-            return Collections.emptyList();
-        }
-        try {
-            return objectMapper.readValue(json, new TypeReference<List<String>>() {});
-        } catch (IOException e) {
-            throw new RuntimeException("JSON을 리스트로 변환하는 데 실패했습니다.", e);
-        }
+    private String applyTemplate(String template, String customerName) {
+        if (template == null) return "";
+        if (customerName == null) customerName = "";
+        return template.replace("{name}", customerName);
     }
 
-    private Map<String, Object> convertJsonToMap(String json) {
-        if (!StringUtils.hasText(json)) {
-            return Collections.emptyMap();
-        }
-        try {
-            return objectMapper.readValue(json, new TypeReference<Map<String, Object>>() {});
-        } catch (IOException e) {
-            throw new RuntimeException("JSON을 맵으로 변환하는 데 실패했습니다.", e);
-        }
+    @Transactional(readOnly = true)
+    public List<MessageResultResponseDto> getMessagesByCampaign(String campaignId) {
+
+        Campaign campaign = getCampaignById(campaignId);
+
+        return messageResultRepository
+                .findByCampaign(campaign)
+                .stream()
+                .map(MessageResultResponseDto::from)
+                .toList();
+    }
+
+    private String escape(String v) {
+        if (v == null) return "";
+        return "\"" + v.replace("\"", "\"\"") + "\"";
+    }
+    private String buildRepresentativeFeatures(
+            List<CustomerSegment> segments,
+            int limit
+    ) {
+        return segments.stream()
+                .map(CustomerSegment::getCustomerFeatures)
+                .filter(Objects::nonNull)
+                .flatMap(f -> Arrays.stream(f.split("\n")))
+                .map(String::trim)
+                .filter(s -> !s.isEmpty())
+                .collect(Collectors.groupingBy(
+                        s -> s,
+                        Collectors.counting()
+                ))
+                .entrySet().stream()
+                .sorted(Map.Entry.<String, Long>comparingByValue().reversed())
+                .limit(limit)
+                .map(Map.Entry::getKey)
+                .collect(Collectors.joining("\n"));
     }
 }

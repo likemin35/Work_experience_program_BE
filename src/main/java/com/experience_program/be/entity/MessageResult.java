@@ -40,9 +40,6 @@ public class MessageResult {
     @Column(name = "classification_reason", columnDefinition = "TEXT")
     private String classificationReason;
 
-    @Column(name = "message_draft_index")
-    private int messageDraftIndex;
-
     @Lob
     @Column(name = "message_text", columnDefinition = "TEXT")
     private String messageText;
@@ -51,7 +48,4 @@ public class MessageResult {
     @Column(name = "validator_report", columnDefinition = "TEXT")
     @JsonRawValue
     private String validatorReport;
-
-    @Column(name = "is_selected")
-    private boolean isSelected;
 }

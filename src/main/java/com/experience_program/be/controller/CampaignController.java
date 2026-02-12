@@ -1,87 +1,152 @@
 package com.experience_program.be.controller;
 
-import com.experience_program.be.dto.*;
-import com.experience_program.be.entity.Campaign;
+import com.experience_program.be.dto.CampaignRequestDto;
+import com.experience_program.be.dto.CampaignResponseDto;
+import com.experience_program.be.dto.MessageResultResponseDto;
+import com.experience_program.be.dto.MessageDraftDto;
+import com.experience_program.be.dto.CustomerSegmentResponseDto;
+import com.experience_program.be.dto.CustomerSegmentMessageDto;
 import com.experience_program.be.service.CampaignService;
-import jakarta.validation.Valid;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.data.domain.Page;
-import org.springframework.data.domain.Pageable;
+import com.experience_program.be.client.AiCampaignClient;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.multipart.MultipartFile;
+import org.springframework.http.MediaType;
+import org.springframework.http.HttpHeaders;
 
-import java.time.LocalDate;
+import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 @RestController
-@RequestMapping("/api/campaigns" )
+@RequestMapping("/api/campaigns")
 public class CampaignController {
 
     private final CampaignService campaignService;
+    private final AiCampaignClient aiCampaignClient;
 
-    @Autowired
-    public CampaignController(CampaignService campaignService) {
-        this.campaignService = campaignService;
-    }
+        public CampaignController(
+                CampaignService campaignService,
+                AiCampaignClient aiCampaignClient
+        ) {
+                this.campaignService = campaignService;
+                this.aiCampaignClient = aiCampaignClient;
+        }
 
-    @PostMapping("/build/interactive")
-    public ResponseEntity<CampaignChatResponseDto> handleInteractiveBuild(@RequestBody CampaignChatRequestDto request) {
-        CampaignChatResponseDto response = campaignService.handleInteractiveBuild(request);
-        return ResponseEntity.ok(response);
-    }
+        @PostMapping(consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+        public ResponseEntity<CampaignResponseDto> createCampaign(
+                @RequestPart("file") MultipartFile pdfFile
+        ) {
+        CampaignRequestDto dto =
+                aiCampaignClient.extractCampaignFromPdf(pdfFile);
 
-    @PostMapping
-    public ResponseEntity<Campaign> createCampaign(@Valid @RequestBody CampaignRequestDto campaignRequest) {
-        Campaign createdCampaign = campaignService.createCampaign(campaignRequest);
-        return ResponseEntity.status(HttpStatus.CREATED).body(createdCampaign);
-    }
+        return ResponseEntity
+                .status(HttpStatus.CREATED)
+                .body(
+                        CampaignResponseDto.from(
+                        campaignService.createCampaign(dto)
+                        )
+                );
+        }
 
-    @GetMapping
-    public ResponseEntity<Page<Campaign>> getAllCampaigns(
-            @RequestParam(required = false) LocalDate requestDate,
-            @RequestParam(required = false) String status,
-            @RequestParam(required = false) String purpose,
-            @RequestParam(required = false) String marketerId,
-            Pageable pageable
+    // CSV 업로드 + 고객 세그먼트 생성
+    @PostMapping("/{campaign_id}/segments")
+    public ResponseEntity<Void> uploadAndSegment(
+            @PathVariable("campaign_id") String campaignId,
+            @RequestParam("file") MultipartFile file
     ) {
-        Page<Campaign> campaigns = campaignService.getAllCampaigns(requestDate, status, purpose, marketerId, pageable);
-        return ResponseEntity.ok(campaigns);
-    }
-
-    @GetMapping("/{campaign_id}")
-    public ResponseEntity<Campaign> getCampaignById(@PathVariable("campaign_id") UUID campaignId) {
-        Campaign campaign = campaignService.getCampaignById(campaignId);
-        return ResponseEntity.ok(campaign);
-    }
-
-    @PutMapping("/{campaign_id}/selection")
-    public ResponseEntity<Void> selectMessage(@PathVariable("campaign_id") UUID campaignId, @RequestBody MessageSelectionDto selectionDto) {
-        campaignService.selectMessage(campaignId, selectionDto.getResultIds());
+        campaignService.uploadCsvAndSegment(campaignId, file);
         return ResponseEntity.ok().build();
     }
 
-    @PostMapping("/{campaign_id}/refine")
-    public ResponseEntity<Void> refineMessage(@PathVariable("campaign_id") UUID campaignId, @RequestBody RefineRequestDto refineRequest) {
-        campaignService.refineMessage(campaignId, refineRequest.getFeedbackText());
-        return ResponseEntity.accepted().build(); // Accepted: 요청이 접수되었으나 처리는 비동기
+    // 세그먼트별 메시지 생성 트리거 (실제 생성 로직은 서비스/AI 쪽)
+    @PostMapping("/{campaign_id}/messages")
+    public ResponseEntity<Void> generateMessages(
+            @PathVariable("campaign_id") String campaignId
+    ) {
+        campaignService.generateMessagesBySegment(campaignId);
+        return ResponseEntity.accepted().build();
     }
 
-    @DeleteMapping("/{campaign_id}")
-    @ResponseStatus(HttpStatus.NO_CONTENT)
-    public void deleteCampaign(@PathVariable("campaign_id") UUID campaignId) {
-        campaignService.deleteCampaign(campaignId);
+    // 세그먼트 결과 조회
+    @GetMapping("/{campaign_id}/segments")
+    public ResponseEntity<List<CustomerSegmentResponseDto>> getCustomerSegments(
+            @PathVariable("campaign_id") String campaignId
+    ) {
+        return ResponseEntity.ok(
+                campaignService.getCustomerSegments(campaignId)
+        );
     }
 
-    @PutMapping("/{campaign_id}/performance")
-    public ResponseEntity<Void> updatePerformance(@PathVariable("campaign_id") UUID campaignId, @Valid @RequestBody CampaignPerformanceUpdateDto performanceRequest) {
-        campaignService.updatePerformance(campaignId, performanceRequest);
+    // 세그먼트 결과 CSV 다운로드
+    @GetMapping("/{campaign_id}/segments/csv")
+    public ResponseEntity<byte[]> downloadCustomerSegmentsCsv(
+            @PathVariable("campaign_id") String campaignId
+    ) {
+        byte[] csv = campaignService.downloadCustomerSegmentsCsv(campaignId);
+
+        return ResponseEntity.ok()
+                .header(
+                        "Content-Disposition",
+                        "attachment; filename=\"customer_segments_" + campaignId + ".csv\""
+                )
+                .header("Content-Type", "text/csv; charset=UTF-8")
+                .body(csv);
+    }
+    
+    @GetMapping("/{campaign_id}/messages")
+    public ResponseEntity<List<MessageResultResponseDto>> getMessages(
+            @PathVariable("campaign_id") String campaignId
+    ) {
+        return ResponseEntity.ok(
+                campaignService.getMessagesByCampaign(campaignId)
+        );
+    }
+
+
+    // 프로모션 목록 조회
+    @GetMapping
+    public ResponseEntity<List<CampaignResponseDto>> getCampaigns() {
+        return ResponseEntity.ok(
+                campaignService.getAllCampaigns()
+        );
+    }
+
+    // 메시지 매핑 결과 조회
+    @GetMapping("/{campaignId}/messages/map")
+    public ResponseEntity<List<CustomerSegmentMessageDto>> mapMessages(
+            @PathVariable UUID campaignId
+    ) {
+        return ResponseEntity.ok(
+                campaignService.mapCustomerMessagesFromDb(
+                        campaignId.toString()
+                )
+        );
+    }
+    // 메시지 매핑 결과 csv 다운로드
+    @GetMapping("/{campaignId}/messages/csv")
+    public ResponseEntity<byte[]> downloadMessageCsv(
+            @PathVariable UUID campaignId
+    ) {
+        byte[] csvBytes =
+                campaignService.downloadCustomerMessageCsvFromDb(
+                        campaignId.toString()
+                );
+
+        return ResponseEntity.ok()
+                .header(HttpHeaders.CONTENT_DISPOSITION,
+                        "attachment; filename=\"customer_messages.csv\"")
+                .contentType(MediaType.TEXT_PLAIN)
+                .body(csvBytes);
+    }
+
+    @PatchMapping("/messages/{result_id}")
+    public ResponseEntity<Void> updateMessageDirect(
+            @PathVariable("result_id") UUID resultId,
+            @RequestBody MessageDraftDto dto
+    ) {
+        campaignService.updateMessageDraft(resultId, dto);
         return ResponseEntity.ok().build();
-    }
-
-    @PostMapping("/{campaign_id}/rag-trigger")
-    public ResponseEntity<Void> triggerRagRegistration(@PathVariable("campaign_id") UUID campaignId) {
-        campaignService.triggerRagRegistration(campaignId);
-        return ResponseEntity.accepted().build(); // Accepted: 요청이 접수되었으나 처리는 비동기
     }
 }

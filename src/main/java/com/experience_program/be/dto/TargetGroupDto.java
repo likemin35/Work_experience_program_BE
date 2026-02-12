@@ -21,6 +21,4 @@ public class TargetGroupDto {
     @JsonProperty("classification_reason")
     private String classification_reason;
 
-    @JsonProperty("message_drafts")
-    private List<MessageDraftDto> message_drafts;
 }

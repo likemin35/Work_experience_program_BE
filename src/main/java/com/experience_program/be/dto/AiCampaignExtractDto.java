@@ -5,9 +5,9 @@ import lombok.Setter;
 
 @Getter
 @Setter
-public class KnowledgeDto {
+public class AiCampaignExtractDto {
+
     private String title;
-    private String content_text;
-    private String source_type;
-    private Boolean is_active;
+    private String coreBenefitText;
+    private String sourceUrl;
 }

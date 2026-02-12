@@ -6,7 +6,6 @@ import lombok.*;
 import org.hibernate.annotations.CreationTimestamp;
 import org.hibernate.annotations.UpdateTimestamp;
 
-import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
@@ -22,9 +21,15 @@ import java.util.UUID;
 public class Campaign {
 
     @Id
-    @GeneratedValue(strategy = GenerationType.UUID)
-    @Column(name = "campaign_id", updatable = false, nullable = false)
-    private UUID campaignId;
+    @Column(name = "campaign_id", length = 36, nullable = false, updatable = false)
+    private String campaignId;
+
+    @PrePersist
+    public void prePersist() {
+        if (this.campaignId == null) {
+            this.campaignId = UUID.randomUUID().toString();
+        }
+    }
 
     @CreationTimestamp
     @Column(name = "request_date", nullable = false, updatable = false)
@@ -33,8 +38,8 @@ public class Campaign {
     @Column(name = "marketer_id", length = 255)
     private String marketerId;
 
-    @Column(name = "purpose", length = 255)
-    private String purpose;
+    @Column(name = "title", length = 255)
+    private String title;
 
     @Lob
     @Column(name = "core_benefit_text", columnDefinition = "TEXT")
@@ -50,31 +55,17 @@ public class Campaign {
     @Column(name = "status", length = 50)
     private String status;
 
-    @Column(name = "actual_ctr", precision = 5, scale = 2)
-    private BigDecimal actualCtr;
-
-    @Column(name = "conversion_rate", precision = 5, scale = 2)
-    private BigDecimal conversionRate;
-
-    @Enumerated(EnumType.STRING)
-    @Column(name = "performance_status")
-    private PerformanceStatus performanceStatus;
-
-    @Column(name = "is_performance_registered", nullable = false, columnDefinition = "boolean default false")
-    private boolean isPerformanceRegistered = false;
-
-    @Column(name = "is_rag_registered", nullable = false, columnDefinition = "boolean default false")
-    private boolean isRagRegistered = false;
-
-    @Lob
-    @Column(name = "performance_notes", columnDefinition = "TEXT")
-    private String performanceNotes;
-
     @UpdateTimestamp
     @Column(name = "updated_at")
     private LocalDateTime updatedAt;
 
-    @OneToMany(mappedBy = "campaign", cascade = CascadeType.ALL, orphanRemoval = true, fetch = FetchType.LAZY)
+    @OneToMany(
+            mappedBy = "campaign",
+            cascade = CascadeType.ALL,
+            orphanRemoval = true,
+            fetch = FetchType.LAZY
+    )
     @JsonManagedReference
+    @Builder.Default
     private List<MessageResult> messageResults = new ArrayList<>();
 }

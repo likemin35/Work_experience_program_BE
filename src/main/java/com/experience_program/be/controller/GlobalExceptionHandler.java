@@ -45,8 +45,12 @@ public class GlobalExceptionHandler {
     // 500 Internal Server Error - 그 외 모든 예외
     @ExceptionHandler(Exception.class)
     public ResponseEntity<ErrorResponseDto> handleAllUncaughtException(Exception ex) {
-        // 실제 운영 환경에서는 ex.printStackTrace() 등을 사용하여 로그를 남겨야 합니다.
-        ErrorResponseDto errorResponse = new ErrorResponseDto(HttpStatus.INTERNAL_SERVER_ERROR.value(), "서버 내부 오류가 발생했습니다. 관리자에게 문의하세요.");
+        ex.printStackTrace();  // 반드시 추가
+
+        ErrorResponseDto errorResponse = new ErrorResponseDto(
+            HttpStatus.INTERNAL_SERVER_ERROR.value(),
+            ex.getMessage()  // 원인 메시지 보이게
+        );
         return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(errorResponse);
     }
 }

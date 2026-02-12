@@ -12,17 +12,16 @@ import java.util.Map;
 @Setter
 public class CampaignRequestDto {
 
-    @NotBlank(message = "마케터 ID는 필수 입력 값입니다.")
+    @NotBlank
     private String marketerId;
 
-    @NotBlank(message = "캠페인 목적은 필수 입력 값입니다.")
-    @Size(max = 255, message = "캠페인 목적은 255자를 초과할 수 없습니다.")
-    private String purpose;
+    @NotBlank
+    private String title;
 
-    @NotBlank(message = "핵심 혜택 내용은 필수 입력 값입니다.")
+    @NotBlank
     private String coreBenefitText;
 
-    private List<String> sourceUrls;
+    private List<String> sourceUrl;
 
     private Map<String, Object> customColumns;
 }
