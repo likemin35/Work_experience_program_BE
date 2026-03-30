@@ -106,6 +106,14 @@ public class CampaignService {
             throw new IllegalStateException("세그먼트 생성 실패");
         }
 
+        Map<String, Object> clusteringStrategy = response.getStrategyMeta();
+        String clusteringMode = safeString(clusteringStrategy != null ? clusteringStrategy.get("strategy_mode") : null);
+        String clusteringReason = safeString(clusteringStrategy != null ? clusteringStrategy.get("reason") : null);
+        String clusteringStrategySuffix =
+                (clusteringMode.isBlank() && clusteringReason.isBlank())
+                        ? ""
+                        : "\n[AI STRATEGY] mode=" + clusteringMode + ", reason=" + clusteringReason;
+
         customerSegmentRepository.deleteByCampaign(campaign);
 
         Set<String> processedCustomerIds = new HashSet<>();
@@ -129,7 +137,7 @@ public class CampaignService {
                                         : ""
                                 )
                                 .targetSegment(cluster.getClusterName())
-                                .segmentReason(cluster.getClusterDescription())
+                                .segmentReason((cluster.getClusterDescription() != null ? cluster.getClusterDescription() : "") + clusteringStrategySuffix)
                                 .customerFeatures(
                                         row != null ? customerDescriptionBuilder.build(row) : ""
                                 )
@@ -293,6 +301,11 @@ public class CampaignService {
             int targetGroupIndex =
                     ((Number) msgGroup.get("target_group_index")).intValue();
             String targetName = (String) msgGroup.get("target_name");
+            String targetFeatures = safeString(msgGroup.get("target_features"));
+            Map<String, Object> strategyMeta = safeMap(msgGroup.get("strategy_meta"));
+            String strategyMode = safeString(strategyMeta.get("mode"));
+            String strategyReason = safeString(strategyMeta.get("reason"));
+            String strategyReferences = convertObjectToJson(strategyMeta.get("references"));
 
             List<Map<String, Object>> drafts =
                     (List<Map<String, Object>>) msgGroup.get("message_drafts");
@@ -303,6 +316,10 @@ public class CampaignService {
                         .campaign(campaign)
                         .targetGroupIndex(targetGroupIndex)
                         .targetName(targetName)
+                        .targetFeatures(targetFeatures)
+                        .strategyMode(strategyMode)
+                        .classificationReason(strategyReason)
+                        .strategyReferences(strategyReferences)
                         .messageText((String) draft.get("message_text"))
                         .build();
 
@@ -549,6 +566,22 @@ public class CampaignService {
         if (v == null) return "";
         return "\"" + v.replace("\"", "\"\"") + "\"";
     }
+
+    private String safeString(Object value) {
+        return value == null ? "" : String.valueOf(value);
+    }
+
+    private Map<String, Object> safeMap(Object value) {
+        if (value instanceof Map<?, ?> map) {
+            Map<String, Object> casted = new HashMap<>();
+            for (Map.Entry<?, ?> entry : map.entrySet()) {
+                casted.put(String.valueOf(entry.getKey()), entry.getValue());
+            }
+            return casted;
+        }
+        return Collections.emptyMap();
+    }
+
     private String buildRepresentativeFeatures(
             List<CustomerSegment> segments,
             int limit

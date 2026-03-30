@@ -40,6 +40,13 @@ public class MessageResult {
     @Column(name = "classification_reason", columnDefinition = "TEXT")
     private String classificationReason;
 
+    @Column(name = "strategy_mode", length = 50)
+    private String strategyMode;
+
+    @Lob
+    @Column(name = "strategy_references", columnDefinition = "TEXT")
+    private String strategyReferences;
+
     @Lob
     @Column(name = "message_text", columnDefinition = "TEXT")
     private String messageText;
